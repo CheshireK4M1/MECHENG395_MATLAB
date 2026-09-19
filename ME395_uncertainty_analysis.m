@@ -26,6 +26,10 @@ function [results, analysisInfo] = ME395_uncertainty_analysis(inputFile, outputF
 %       TimeRange       [startTime endTime], inclusive
 %       ChannelSettings table with columns:
 %           Channel, Quantity, Unit, AccuracyError, Resolution
+%       Delimiter       text delimiter (default: automatic detection)
+%       HeaderRow       one-based caption line; 0 for no captions
+%       DataStartRow    one-based first measurement line
+%       TimeColumn      processed caption or index; 0 uses row index
 %   If ChannelSettings is omitted for a native export, dialogs collect the
 %   settings. AccuracyError and Resolution are absolute values in Unit.
 %
@@ -175,6 +179,7 @@ function [results, analysisInfo] = ME395_uncertainty_analysis(inputFile, outputF
     precisionContributionPercent = nan(numberOfQuantities, 1);
     resolutionContributionPercent = nan(numberOfQuantities, 1);
     dominantErrorSource = strings(numberOfQuantities, 1);
+    errorSummary = strings(numberOfQuantities, 1);
     roundedAverage = nan(numberOfQuantities, 1);
     roundedFinalUncertainty = nan(numberOfQuantities, 1);
     finalReport = strings(numberOfQuantities, 1);
@@ -212,6 +217,7 @@ function [results, analysisInfo] = ME395_uncertainty_analysis(inputFile, outputF
                 quantities(k));
             finalReport(k) = "N < 2: precision and final uncertainty unavailable";
             dominantErrorSource(k) = "Unavailable";
+            errorSummary(k) = "Accuracy: unavailable; Precision: unavailable; Resolution: unavailable; Dominant: unavailable (N < 2)";
             continue
         end
 
@@ -243,28 +249,27 @@ function [results, analysisInfo] = ME395_uncertainty_analysis(inputFile, outputF
         dominantErrorSource(k) = dominantSource(accuracyError(k), ...
             precisionErrorMean(k), resolutionError(k));
 
-        [roundedAverage(k), roundedFinalUncertainty(k), valueText, errorText] = ...
-            roundForReport(averageValue(k), finalUncertaintyMean(k), ...
-            uncertaintySigDigits);
-        finalReport(k) = string(sprintf('%s %c %s %s', ...
-            valueText, char(177), errorText, char(resultUnit(k))));
+        errorSummary(k) = string(sprintf( ...
+            'Accuracy: %.6g%%; Precision: %.6g%%; Resolution: %.6g%%; Dominant: %s', ...
+            accuracyContributionPercent(k), precisionContributionPercent(k), ...
+            resolutionContributionPercent(k), char(dominantErrorSource(k))));
+
+        [finalReport(k), roundedAverage(k), roundedFinalUncertainty(k)] = ...
+            ME395_format_report(averageValue(k), finalUncertaintyMean(k), ...
+            resultUnit(k), uncertaintySigDigits);
     end
 
     results = table(resultQuantity, resultSourceColumn, resultUnit, numberOfReadings, ...
         averageValue, standardDeviation, standardDeviationOfMean, ...
         accuracyError, precisionErrorSingle, precisionErrorMean, ...
         instrumentResolution, resolutionError, finalUncertaintySingle, ...
-        finalUncertaintyMean, accuracyContributionPercent, ...
-        precisionContributionPercent, resolutionContributionPercent, ...
-        dominantErrorSource, roundedAverage, roundedFinalUncertainty, ...
+        finalUncertaintyMean, errorSummary, roundedAverage, roundedFinalUncertainty, ...
         finalReport, ...
         'VariableNames', {'Quantity', 'SourceColumn', 'Unit', 'N', 'Average', ...
         'StandardDeviation', 'StandardDeviationOfMean', 'AccuracyError', ...
         'PrecisionErrorSingle', 'PrecisionErrorMean', 'Resolution', ...
         'ResolutionError', 'FinalUncertaintySingle', ...
-        'FinalUncertaintyMean', 'AccuracyContributionPercent', ...
-        'PrecisionContributionPercent', 'ResolutionContributionPercent', ...
-        'DominantErrorSource', 'RoundedAverage', ...
+        'FinalUncertaintyMean', 'ErrorSummary', 'RoundedAverage', ...
         'RoundedFinalUncertainty', 'FinalReport'});
 
     method = buildMethodTable(uncertaintySigDigits);
@@ -288,46 +293,13 @@ end
 
 
 function [raw, metadata] = readNativeLabExport(inputFile, labOptions)
-    fileText = fileread(inputFile);
-    fileText = strrep(fileText, sprintf('\r\n'), sprintf('\n'));
-    fileText = strrep(fileText, sprintf('\r'), sprintf('\n'));
-    lines = split(string(fileText), newline);
-
-    headerIndex = find(contains(lines, char(9)), 1, 'first');
-    if isempty(headerIndex)
-        error('ME395:LabHeaderNotFound', ...
-            'No tab-delimited channel header was found in the lab export.');
-    end
-
-    channelHeaders = strtrim(split(lines(headerIndex), char(9)));
+    [data, channelHeaders, lines, headerIndex, importInfo] = ...
+        ME395_read_lab_export(inputFile, labOptions);
     numberOfColumns = numel(channelHeaders);
-    if numberOfColumns < 2
-        error('ME395:LabColumnsMissing', ...
-            'The lab export must contain a time column and at least one data channel.');
-    end
 
-    dataLines = lines(headerIndex + 1:end);
-    dataLines = dataLines(~missingText(dataLines));
-    if isempty(dataLines)
-        error('ME395:LabDataMissing', 'The lab export contains no numeric data rows.');
-    end
-
-    formatSpec = repmat('%f', 1, numberOfColumns);
-    parsed = textscan(char(strjoin(dataLines, newline)), formatSpec, ...
-        'Delimiter', char(9), 'CollectOutput', true, ...
-        'ReturnOnError', false, 'EmptyValue', NaN);
-    data = parsed{1};
-    if size(data, 1) ~= numel(dataLines) || size(data, 2) ~= numberOfColumns
-        error('ME395:MalformedLabData', ...
-            ['The numeric data section does not consistently match the ' ...
-             '%d detected channel headers.'], numberOfColumns);
-    end
-    if any(~isfinite(data), 'all')
-        error('ME395:InvalidLabData', ...
-            'The lab export contains missing or nonfinite numeric values.');
-    end
-
-    preamble = strtrim(lines(1:headerIndex - 1));
+    preambleEnd = headerIndex - 1;
+    if headerIndex == 0, preambleEnd = importInfo.DataStartRow - 1; end
+    preamble = strtrim(lines(1:preambleEnd));
     preamble = preamble(~missingText(preamble));
     experimentTitle = "";
     recordedAt = "";
@@ -353,6 +325,20 @@ function [raw, metadata] = readNativeLabExport(inputFile, labOptions)
         normalizedHeaders(k) = string(normalizeName(channelHeaders(k)));
     end
     timeIndex = find(startsWith(normalizedHeaders, "time"), 1, 'first');
+    if isfield(labOptions, 'TimeColumn')
+        choice = labOptions.TimeColumn;
+        if isnumeric(choice)
+            validateattributes(choice, {'numeric'}, ...
+                {'scalar','integer','nonnegative','<=',numberOfColumns});
+            timeIndex = choice;
+            if choice == 0, timeIndex = []; end
+        else
+            timeIndex = find(strcmpi(channelHeaders, string(choice)));
+            if numel(timeIndex) ~= 1
+                error('ME395:InvalidTimeColumn', 'TimeColumn must uniquely match a processed column caption.');
+            end
+        end
+    end
     if isempty(timeIndex)
         timeValues = (0:size(data, 1) - 1)';
         timeHeader = "Row index";
@@ -446,7 +432,7 @@ function [raw, metadata] = readNativeLabExport(inputFile, labOptions)
         "AnalysisNote"
         ];
     metadataValues = [
-        "Native tab-delimited lab export"
+        "Delimited numeric lab export"
         string(inputFile)
         experimentTitle
         recordedAt
@@ -459,6 +445,12 @@ function [raw, metadata] = readNativeLabExport(inputFile, labOptions)
         strjoin(settings.Channel, ", ")
         "Use a nominally steady interval when estimating precision uncertainty."
         ];
+    metadataFields = [metadataFields; "HeaderRow"; "DataStartRow"; "Delimiter"; ...
+        "OriginalHeaders"; "ProcessedHeaders"; "RepeatedHeadersSkipped"; "Preamble"];
+    metadataValues = [metadataValues; string(headerIndex); string(importInfo.DataStartRow); ...
+        replace(importInfo.Delimiter, char(9), "TAB"); ...
+        strjoin(importInfo.OriginalHeaders, " | "); strjoin(channelHeaders, " | "); ...
+        string(importInfo.RepeatedHeadersSkipped); strjoin(preamble, " | ")];
     metadata = table(metadataFields, metadataValues, ...
         'VariableNames', {'Field', 'Value'});
 end
@@ -519,9 +511,9 @@ function settings = promptChannelSettings(channelHeaders, candidateIndices)
         defaultUnit = inferUnit(Channel(k));
         prompts = {
             'Output quantity name:'
-            'Unit:'
-            'Absolute accuracy error:'
-            'Instrument resolution (smallest recorded increment):'
+            'Unit of the input measurements (report units scale automatically):'
+            'Absolute accuracy error (in the input unit):'
+            'Instrument resolution (smallest increment, in the input unit):'
             };
         defaults = {defaultQuantity, char(defaultUnit), '', ''};
 
@@ -770,65 +762,6 @@ function label = dominantSource(accuracy, precision, resolution)
 end
 
 
-function [roundedValue, roundedError, valueText, errorText] = ...
-        roundForReport(value, uncertainty, significantDigits)
-    if uncertainty < 0 || ~isfinite(uncertainty)
-        error('ME395:InvalidUncertainty', ...
-            'Uncertainty must be a finite, nonnegative number.');
-    end
-
-    if uncertainty == 0
-        roundedValue = value;
-        roundedError = 0;
-        valueText = sprintf('%.15g', value);
-        errorText = '0';
-        return
-    end
-
-    place = floor(log10(abs(uncertainty))) - significantDigits + 1;
-    step = 10^place;
-    roundedError = roundHalfToEven(uncertainty, step);
-
-    % A value such as 9.96 can round to 10, changing the reporting place.
-    adjustedPlace = floor(log10(abs(roundedError))) - significantDigits + 1;
-    if adjustedPlace ~= place
-        place = adjustedPlace;
-        step = 10^place;
-        roundedError = roundHalfToEven(uncertainty, step);
-    end
-
-    roundedValue = roundHalfToEven(value, step);
-    decimalPlaces = max(0, -place);
-    valueText = sprintf(['%.' num2str(decimalPlaces) 'f'], roundedValue);
-    errorText = sprintf(['%.' num2str(decimalPlaces) 'f'], roundedError);
-end
-
-
-function rounded = roundHalfToEven(value, step)
-    scaled = value / step;
-    signValue = sign(scaled);
-    absoluteScaled = abs(scaled);
-    lowerInteger = floor(absoluteScaled);
-    fraction = absoluteScaled - lowerInteger;
-    tolerance = 8 * eps(max(1, absoluteScaled));
-
-    if fraction > 0.5 + tolerance
-        roundedInteger = lowerInteger + 1;
-    elseif fraction < 0.5 - tolerance
-        roundedInteger = lowerInteger;
-    elseif mod(lowerInteger, 2) == 0
-        roundedInteger = lowerInteger;
-    else
-        roundedInteger = lowerInteger + 1;
-    end
-
-    rounded = signValue * roundedInteger * step;
-    if rounded == 0
-        rounded = 0; % Avoid displaying negative zero.
-    end
-end
-
-
 function method = buildMethodTable(significantDigits)
     metric = [
         "Average"
@@ -841,6 +774,7 @@ function method = buildMethodTable(significantDigits)
         "FinalUncertaintySingle"
         "FinalUncertaintyMean"
         "FinalReport"
+        "ErrorSummary"
         "Outliers"
         ];
 
@@ -855,8 +789,9 @@ function method = buildMethodTable(significantDigits)
         "sqrt(AccuracyError^2 + PrecisionErrorSingle^2 + ResolutionError^2)"
         "sqrt(AccuracyError^2 + PrecisionErrorMean^2 + ResolutionError^2)"
         sprintf(['Average +/- FinalUncertaintyMean; uncertainty has %d ' ...
-            'significant digit(s), and average is rounded to the same place'], ...
+            'significant digit(s), and average is rounded to the same place; FinalReport auto-scales units, while all numeric columns retain Unit. A nonzero mean lost to rounding is also shown unrounded'], ...
             significantDigits)
+        "Accuracy, precision of mean, and resolution percentages = 100*error^2/FinalUncertaintyMean^2; includes dominant source (ties retained). All zero errors give 0% each."
         "none removed automatically"
         ];
 

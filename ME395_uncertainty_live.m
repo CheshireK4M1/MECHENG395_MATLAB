@@ -13,6 +13,11 @@ uncertaintySignificantDigits = 1;
 % For a native lab export, leave labOptions empty to choose the channel,
 % steady analysis interval, unit, accuracy error, and resolution in dialogs.
 labOptions = struct();
+% Unfamiliar text layouts can override automatic detection, for example:
+% labOptions.Delimiter = char(9);
+% labOptions.HeaderRow = 5;
+% labOptions.DataStartRow = 7;
+% labOptions.TimeColumn = 1; % Caption or column number; 0 uses row index.
 
 % For a repeatable, noninteractive run, use a settings table such as the
 % illustrative example below. Replace error values with verified values.
@@ -28,7 +33,7 @@ labOptions = struct();
     inputFile, outputFile, uncertaintySignificantDigits, labOptions);
 
 %% Final report strings
-results(:, {'Quantity', 'SourceColumn', 'FinalReport', 'DominantErrorSource'})
+results(:, {'Quantity', 'SourceColumn', 'FinalReport', 'ErrorSummary'})
 
 %% Full numerical results
 results
